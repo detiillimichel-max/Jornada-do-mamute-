@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ilha do Mamute</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #e0e0e0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+            touch-action: manipulation; 
+        }
+        #gameCanvas {
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas" width="800" height="250"></canvas>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+// Cores de fundo para cada fase da Ilha
+const faseBackgrounds = {
+    1: "#e3f2fd", // Azul gelo claro
+    2: "#fff9c4", // Entardecer amarelado
+    3: "#ffcc80", // Deserto alaranjado
+    4: "#b2dfdb"  // Selva esverdeada
+};
+
+// Lista de obstáculos (fauna, flora e clima da ilha)
+const obstacleEmojis = [
+    "🦛","🦒","🦍","🐒","🐆","🐪","🐫","🐦","🐓","🐔",
+    "🐣","🐤","🐥","  ","🦆","🦢","🦤","🦜","🦉","🦅",
+    "🌱","☘️","🍀","🪴","🌵","🌴","🌵","🔥","⚡","☀️"
+];
+
+// Variáveis de ambiente das nuvens de fundo
+const clouds = [
+    { x: 100, y: 30, speed: 0.2, size: 40 },
+    { x: 400, y: 60, speed: 0.4, size: 60 },
+    { x: 700, y: 20, speed: 0.3, size: 50 }
+];
+
+let audioCtx = null;
+let score = 0;
+let highScore = localStorage.getItem("dinoHighScore") ? parseInt(localStorage.getItem("dinoHighScore")) : 0;
+let gameOver = false;
+let gameSpeed = 5;
+let lives = 3; 
+let invulnerableFrames = 0; 
+let currentPhase = 1;
+
+const dino = {
+    x: 50,
+    y: 165,
+    width: 65,
+    height: 55,
+    vy: 0,
+    gravity: 0.6,
+    jumpForce: -13, 
+    isJumping: false
+};
+
+const obstacles = [];
+const obstacleConfig = {
+    width: 55,
+    height: 55,
+    minInterval: 70,
+    nextInterval: 90
+};
+let frameCount = 0;
+
+// Sistema de partículas de poeira/neve para os pés do mamute
+const particles = [];
+function createDust(x, y, phase) {
+    if (Math.random() > 0.4) return;
+    particles.push({
+        x: x + 10,
+        y: y + dino.height - 5,
+        vx: -(gameSpeed * 0.4) - Math.random() * 2,
+        vy: -Math.random() * 2,
+        size: Math.random() * 4 + 2,
+        alpha: 1,
+        color: phase === 3 ? "rgba(141, 110, 99, 0.7)" : "rgba(255, 255, 255, 0.8)"
+    });
+}
+
+function initAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+}
+
+function playSound(type) {
+    if (!audioCtx) return;
+    try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        if (type === 'jump') {
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(400, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.1);
+        } else if (type === 'score') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(600, audioCtx.currentTime);
+            osc.frequency.setValueAtTime(800, audioCtx.currentTime + 0.08);
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.2);
+        } else if (type === 'hit') {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(120, audioCtx.currentTime);
+            osc.frequency.linearRampToValueAtTime(40, audioCtx.currentTime + 0.3);
+            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.3);
+        }
+    } catch(e) {}
+}
+
+function handleAction() {
+    initAudio();
+    if (!dino.isJumping && !gameOver) {
+        dino.vy = dino.jumpForce;
+        dino.isJumping = true;
+        playSound('jump');
+    }
+    if (gameOver) {
+        resetGame();
+    }
+}
+
+window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp") {
+        e.preventDefault();
+        handleAction();
+    }
+});
+
+window.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    handleAction();
+}, { passive: false });
+
+function spawnObstacle() {
+    frameCount++;
+    if (frameCount > obstacleConfig.nextInterval) {
+        const randomEmoji = obstacleEmojis[Math.floor(Math.random() * obstacleEmojis.length)];
+        obstacles.push({
+            x: canvas.width,
+            y: canvas.height - obstacleConfig.height,
+            width: obstacleConfig.width,
+            height: obstacleConfig.height,
+            emoji: randomEmoji
+        });
+        frameCount = 0;
+        obstacleConfig.nextInterval = Math.floor(Math.random() * 50) + obstacleConfig.minInterval;
+    }
+}
+function update() {
+    if (gameOver) return;
+
+    if (invulnerableFrames > 0) {
+        invulnerableFrames--;
+    }
+
+    currentPhase = Math.min(Math.floor(score / 10) + 1, 4);
+
+    if (!dino.isJumping && (currentPhase === 1 || currentPhase === 2 || currentPhase === 3)) {
+        createDust(dino.x, dino.y, currentPhase);
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.alpha -= 0.03;
+        if (p.alpha <= 0) particles.splice(i, 1);
+    }
+
+    for (let cloud of clouds) {
+        cloud.x -= cloud.speed;
+        if (cloud.x + cloud.size < 0) {
+            cloud.x = canvas.width + 20;
+        }
+    }
+
+    dino.vy += dino.gravity;
+    dino.y += dino.vy;
+
+    const groundY = canvas.height - dino.height;
+    if (dino.y > groundY) {
+        dino.y = groundY;
+        dino.vy = 0;
+        dino.isJumping = false;
+    }
+
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+        obstacles[i].x -= gameSpeed;
+
+        if (
+            invulnerableFrames === 0 &&
+            dino.x + 15 < obstacles[i].x + obstacles[i].width &&
+            dino.x + dino.width - 15 > obstacles[i].x &&
+            dino.y + 10 < obstacles[i].y + obstacles[i].height &&
+            dino.y + dino.height > obstacles[i].y
+        ) {
+            playSound('hit');
+            lives--; 
+            
+            if (lives <= 0) {
+                gameOver = true;
+                if (score > highScore) {
+                    highScore = score;
+                    localStorage.setItem("dinoHighScore", highScore);
+                }
+            } else {
+                invulnerableFrames = 90; 
+            }
+        }
+
+        if (!gameOver && obstacles[i].x + obstacles[i].width < 0) {
+            obstacles.splice(i, 1);
+            score++;
+            playSound('score');
+            if (score % 5 === 0) gameSpeed += 0.5;
+        }
+    }
+
+    spawnObstacle();
+}
+
+function drawProceduralMammoth(ctx, x, y, width, height, phase) {
+    ctx.save();
+    
+    let bodyColor = "#5d4037"; 
+    let tuskColor = "#ffffff"; 
+    
+    if (phase === 1) {
+        bodyColor = "#795548"; 
+    } else if (phase === 4) {
+        bodyColor = "#8d6e63"; 
+        tuskColor = "#fff8e1"; 
+    }
+
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath();
+    ctx.ellipse(x + width * 0.45, y + height * 0.5, width * 0.35, height * 0.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(x + width * 0.7, y + height * 0.35, height * 0.25, 0, Math.PI * 2);
+    ctx.fill();
+
+    let legOffset = Math.sin(Date.now() * 0.15) * 8;
+    ctx.lineWidth = width * 0.12;
+    ctx.strokeStyle = bodyColor;
+    ctx.lineCap = "round";
+
+    ctx.beginPath();
+    ctx.moveTo(x + width * 0.25, y + height * 0.7);
+    ctx.lineTo(x + width * 0.2 + legOffset, y + height * 0.95);
+    ctx.moveTo(x + width * 0.65, y + height * 0.7);
+    ctx.lineTo(x + width * 0.7 - legOffset, y + height * 0.95);
+    ctx.stroke();
+
+    ctx.strokeStyle = phase === 4 ? "#704d44" : "#4e342e"; 
+    ctx.beginPath();
+    ctx.moveTo(x + width * 0.35, y + height * 0.7);
+    ctx.lineTo(x + width * 0.35 - legOffset, y + height * 0.95);
+    ctx.moveTo(x + width * 0.55, y + height * 0.7);
+    ctx.lineTo(x + width * 0.55 + legOffset, y + height * 0.95);
+    ctx.stroke();
+
+    ctx.strokeStyle = bodyColor;
+    ctx.lineWidth = width * 0.09;
+    ctx.beginPath();
+    ctx.moveTo(x + width * 0.8, y + height * 0.4);
+    if (phase === 4) {
+        ctx.bezierCurveTo(x + width * 0.95, y + height * 0.5, x + width * 0.9, y + height * 0.2, x + width * 0.95, y + height * 0.15);
+    } else {
+        ctx.lineTo(x + width * 0.9, y + height * 0.6);
+    }
+    ctx.stroke();
+
+    if (phase === 1) {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(x + width * 0.2, y + height * 0.2, 4, 4);
+        ctx.fillRect(x + width * 0.35, y + height * 0.15, 4, 4);
+        ctx.fillRect(x + width * 0.5, y + height * 0.18, 4, 4);
+    } else if (phase === 2) {
+        ctx.strokeStyle = "#3e2723";
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 5; i++) {
+            ctx.beginPath();
+            ctx.moveTo(x + width * (0.3 + i * 0.08), y + height * 0.15);
+            ctx.lineTo(x + width * (0.28 + i * 0.08), y + height * 0.08);
+            ctx.stroke();
+        }
+    } else if (phase === 3) {
+        ctx.fillStyle = "#3e2723";
+        ctx.beginPath();
+        ctx.ellipse(x + width * 0.45, y + height * 0.75, width * 0.2, height * 0.1, 0, 0, Math.PI * 2);
+        ctx.fill();
+    } else if (phase === 4) {
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(x + width * 0.72, y + height * 0.28, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#000000";
+        ctx.beginPath();
+        ctx.arc(x + width * 0.74, y + height * 0.28, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#a18262";
+        ctx.beginPath();
+        ctx.arc(x + width * 0.55, y + height * 0.32, 10, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.strokeStyle = tuskColor;
+    ctx.lineWidth = width * 0.07;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(x + width * 0.78, y + height * 0.42);
+    ctx.quadraticCurveTo(x + width * 0.95, y + height * 0.48, x + width * 0.98, y + height * 0.35);
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+function draw() {
+    ctx.fillStyle = faseBackgrounds[currentPhase];
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    for (let cloud of clouds) {
+        ctx.font = `${cloud.size}px Arial`;
+        ctx.fillText("☁️", cloud.x, cloud.y);
+    }
+
+    for (let p of particles) {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.alpha;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1.0; 
+
+    ctx.strokeStyle = "#535353";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, canvas.height);
+    ctx.lineTo(canvas.width, canvas.height);
+    ctx.stroke();
+
+    if (invulnerableFrames === 0 || Math.floor(invulnerableFrames / 5) % 2 === 0) {
+        drawProceduralMammoth(ctx, dino.x, dino.y, dino.width, dino.height, currentPhase);
+    }
+
+    for (let obs of obstacles) {
+        ctx.font = `${obs.height}px Arial`;
+        ctx.fillText(obs.emoji, obs.x, obs.y);
+    }
+
+    ctx.font = "22px Arial";
+    let hearts = "";
+    for(let i = 0; i < lives; i++) hearts += "❤️";
+    ctx.fillText(hearts, 20, 20);
+
+    ctx.fillStyle = "#535353";
+    ctx.font = "bold 15px Arial";
+    ctx.textAlign = "right";
+    ctx.fillText(`ILHA FASE: ${currentPhase}   HI: ${highScore}   Score: ${score}`, canvas.width - 20, 25);
+
+    if (gameOver) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 30px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText("FIM DE JOGO", canvas.width / 2, canvas.height / 2 - 10);
+        ctx.font = "16px Arial";
+        ctx.fillText("Toque na tela ou pressione Espaço para reiniciar", canvas.width / 2, canvas.height / 2 + 25);
+    }
+}
+
+function resetGame() {
+    score = 0;
+    lives = 3; 
+    gameOver = false;
+    gameSpeed = 5;
+    obstacles.length = 0;
+    particles.length = 0;
+    currentPhase = 1;
+    dino.y = canvas.height - dino.height;
+    dino.vy = 0;
+    frameCount = 0;
+    invulnerableFrames = 0;
+    loop();
+}
+
+function updateGameLoop() {
+    update();
+    draw();
+    if (!gameOver) {
+        requestAnimationFrame(updateGameLoop);
+    }
+}
+
+function loop() {
+    updateGameLoop();
+}
+
+loop();
+</script>
+</body>
+</html>
